@@ -1,0 +1,22 @@
+# Python
+__pycache__/
+*.pyc
+*.pyo
+
+# Database (contains test data, new user should start fresh)
+backend/erp.db
+
+# IDE
+.vscode/
+.idea/
+
+# WorkBuddy
+.workbuddy/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Temp
+*.tmp
+*.log
