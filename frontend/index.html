@@ -165,6 +165,32 @@
         .selector-link:hover { text-decoration:underline; }
         .selector-row { cursor:pointer; transition:background .15s; }
         .selector-row:hover { background:#eef2ff !important; }
+
+        /* 统计分析 */
+        .analytics-grid { display:grid; grid-template-columns:2fr 1fr; gap:20px; margin-bottom:20px; }
+        .analytics-grid-2 { display:grid; grid-template-columns:1fr 1fr; gap:20px; margin-bottom:20px; }
+        .chart-toolbar { display:flex; align-items:center; gap:8px; }
+        .segmented { display:inline-flex; border:1px solid var(--border); border-radius:8px; overflow:hidden; background:#fff; }
+        .segmented button { border:0; border-right:1px solid var(--border); background:#fff; color:var(--text-muted); padding:6px 12px; font-size:12px; cursor:pointer; }
+        .segmented button:last-child { border-right:0; }
+        .segmented button.active { background:var(--primary); color:#fff; }
+        .line-chart { width:100%; min-height:260px; }
+        .chart-summary { display:flex; gap:14px; flex-wrap:wrap; margin-top:10px; color:var(--text-muted); font-size:12px; }
+        .chart-summary strong { color:var(--text); }
+        .rank-list { display:flex; flex-direction:column; gap:10px; }
+        .rank-item { display:grid; grid-template-columns:24px 1fr auto; gap:10px; align-items:center; }
+        .rank-index { width:24px; height:24px; border-radius:50%; background:#eef2ff; color:#4338ca; display:flex; align-items:center; justify-content:center; font-size:12px; font-weight:700; }
+        .rank-name { font-size:13px; font-weight:600; white-space:nowrap; overflow:hidden; text-overflow:ellipsis; }
+        .rank-meta { font-size:12px; color:var(--text-muted); margin-top:3px; }
+        .rank-value { font-size:12px; font-weight:700; color:var(--text); white-space:nowrap; }
+        .rank-bar { grid-column:2 / 4; height:7px; background:#e2e8f0; border-radius:999px; overflow:hidden; }
+        .rank-bar span { display:block; height:100%; background:#10b981; border-radius:999px; }
+        .compact-table th, .compact-table td { padding:8px 10px; }
+        .metric-pos { color:#059669; font-weight:700; }
+        .metric-neg { color:#dc2626; font-weight:700; }
+        @media (max-width:1100px) {
+            .analytics-grid, .analytics-grid-2 { grid-template-columns:1fr; }
+        }
     </style>
 </head>
 <body>
@@ -246,6 +272,49 @@
                 <button class="btn btn-outline" onclick="loadDashboard()">🔄 刷新数据</button>
             </div>
             <div class="stats-grid" id="statsGrid"></div>
+
+            <div class="analytics-grid">
+                <div class="card">
+                    <div class="card-header">
+                        <h3>📈 销售额趋势</h3>
+                        <div class="chart-toolbar">
+                            <div class="segmented">
+                                <button id="trendDayBtn" class="active" onclick="setSalesTrendPeriod('day')">按日</button>
+                                <button id="trendMonthBtn" onclick="setSalesTrendPeriod('month')">按月</button>
+                            </div>
+                            <button class="btn btn-outline btn-sm" onclick="loadAnalytics()">刷新</button>
+                        </div>
+                    </div>
+                    <div id="salesTrendChart" class="line-chart"></div>
+                    <div id="salesTrendSummary" class="chart-summary"></div>
+                </div>
+                <div class="card">
+                    <div class="card-header"><h3>🏆 商品销量排行</h3></div>
+                    <div id="salesRankList" class="rank-list"></div>
+                </div>
+            </div>
+
+            <div class="analytics-grid-2">
+                <div class="card">
+                    <div class="card-header"><h3>💹 商品利润分析</h3></div>
+                    <div id="profitProducts"></div>
+                </div>
+                <div class="card">
+                    <div class="card-header"><h3>🧾 订单利润分析</h3></div>
+                    <div id="profitOrders"></div>
+                </div>
+            </div>
+
+            <div class="analytics-grid-2">
+                <div class="card">
+                    <div class="card-header"><h3>👥 客户对账</h3></div>
+                    <div id="customerRecon"></div>
+                </div>
+                <div class="card">
+                    <div class="card-header"><h3>🏭 供应商对账</h3></div>
+                    <div id="supplierRecon"></div>
+                </div>
+            </div>
 
             <div class="card">
                 <div class="card-header"><h3>⚠️ 库存预警</h3><span id="alertCount"></span></div>
@@ -1113,6 +1182,15 @@ async function apiPost(path, data) {
     return resp.json();
 }
 
+async function apiList(path, perPage = 1000) {
+    const sep = path.includes('?') ? '&' : '?';
+    return listData(await apiGet(`${path}${sep}per_page=${perPage}`));
+}
+
+function listData(result) {
+    return Array.isArray(result) ? result : (result?.data || []);
+}
+
 function statusBadge(status) {
     const map = {
         'draft': 'badge-gray', 'submitted': 'badge-indigo', 'confirmed': 'badge-teal',
@@ -1139,6 +1217,10 @@ function stockStatusBadge(status) {
 }
 
 function formatMoney(val) { return Number(val || 0).toFixed(2); }
+
+function metricClass(val) {
+    return Number(val || 0) >= 0 ? 'metric-pos' : 'metric-neg';
+}
 
 // ============================================================
 // 页面导航
@@ -1205,6 +1287,8 @@ document.querySelectorAll('.sidebar nav > a[data-page]').forEach(link => {
 // ============================================================
 // 仪表盘
 // ============================================================
+let salesTrendPeriod = 'day';
+
 async function loadDashboard() {
     try {
         const data = await apiGet('/api/dashboard');
@@ -1272,7 +1356,186 @@ async function loadDashboard() {
                 `<tr><td>${o.order_no}</td><td>${o.customer_name}</td><td>¥${formatMoney(o.total_amount)}</td><td>${statusBadge(o.status)}</td></tr>`
               ).join('') + '</tbody></table>';
 
+        loadAnalytics();
+
     } catch(e) { toast('加载仪表盘失败: ' + e.message, 'error'); }
+}
+
+function setSalesTrendPeriod(period) {
+    salesTrendPeriod = period;
+    $('trendDayBtn').classList.toggle('active', period === 'day');
+    $('trendMonthBtn').classList.toggle('active', period === 'month');
+    loadSalesTrend();
+}
+
+async function loadAnalytics() {
+    await Promise.allSettled([
+        loadSalesTrend(),
+        loadSalesRank(),
+        loadProfitProducts(),
+        loadProfitOrders(),
+        loadCustomerRecon(),
+        loadSupplierRecon()
+    ]);
+}
+
+async function loadSalesTrend() {
+    try {
+        const result = await apiGet(`/api/stats/sales-trend?period=${salesTrendPeriod}`);
+        renderSalesTrend(result.data || []);
+    } catch(e) {
+        $('salesTrendChart').innerHTML = `<div class="empty-state"><p>销售趋势加载失败</p></div>`;
+    }
+}
+
+function renderSalesTrend(data) {
+    if (!data.length) {
+        $('salesTrendChart').innerHTML = '<div class="empty-state"><p>暂无销售趋势数据</p></div>';
+        $('salesTrendSummary').innerHTML = '';
+        return;
+    }
+
+    const width = 760;
+    const height = 260;
+    const pad = { left: 58, right: 20, top: 20, bottom: 42 };
+    const values = data.map(d => Number(d.sales_amount || 0));
+    const maxVal = Math.max(...values, 1);
+    const innerW = width - pad.left - pad.right;
+    const innerH = height - pad.top - pad.bottom;
+    const points = data.map((d, i) => {
+        const x = pad.left + (data.length === 1 ? innerW / 2 : i * innerW / (data.length - 1));
+        const y = pad.top + innerH - (Number(d.sales_amount || 0) / maxVal) * innerH;
+        return { x, y, amount: Number(d.sales_amount || 0), label: d.label, order_count: d.order_count || 0 };
+    });
+    const polyline = points.map(p => `${p.x},${p.y}`).join(' ');
+    const yTicks = [0, 0.5, 1].map(rate => {
+        const y = pad.top + innerH - rate * innerH;
+        const value = maxVal * rate;
+        return `<g>
+            <line x1="${pad.left}" y1="${y}" x2="${width - pad.right}" y2="${y}" stroke="#e2e8f0" />
+            <text x="${pad.left - 10}" y="${y + 4}" text-anchor="end" font-size="11" fill="#64748b">${formatMoney(value)}</text>
+        </g>`;
+    }).join('');
+    const step = Math.max(1, Math.ceil(data.length / 6));
+    const xLabels = points.map((p, i) => i % step === 0 || i === points.length - 1
+        ? `<text x="${p.x}" y="${height - 14}" text-anchor="middle" font-size="11" fill="#64748b">${p.label.slice(salesTrendPeriod === 'month' ? 2 : 5)}</text>`
+        : '').join('');
+    const pointNodes = points.map(p => `
+        <circle cx="${p.x}" cy="${p.y}" r="4" fill="#4f46e5">
+            <title>${p.label} 销售额 ¥${formatMoney(p.amount)}，订单 ${p.order_count} 单</title>
+        </circle>`).join('');
+
+    $('salesTrendChart').innerHTML = `
+        <svg viewBox="0 0 ${width} ${height}" role="img" aria-label="销售额趋势图" style="width:100%;height:260px;">
+            ${yTicks}
+            <line x1="${pad.left}" y1="${height - pad.bottom}" x2="${width - pad.right}" y2="${height - pad.bottom}" stroke="#cbd5e1" />
+            ${xLabels}
+            <polyline points="${polyline}" fill="none" stroke="#4f46e5" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" />
+            <polygon points="${pad.left},${height - pad.bottom} ${polyline} ${width - pad.right},${height - pad.bottom}" fill="rgba(79,70,229,0.08)" />
+            ${pointNodes}
+        </svg>`;
+
+    const totalAmount = data.reduce((sum, d) => sum + Number(d.sales_amount || 0), 0);
+    const totalOrders = data.reduce((sum, d) => sum + Number(d.order_count || 0), 0);
+    const avgAmount = data.length ? totalAmount / data.length : 0;
+    $('salesTrendSummary').innerHTML = `
+        <span>统计区间：<strong>${data[0].label}</strong> 至 <strong>${data[data.length - 1].label}</strong></span>
+        <span>销售额：<strong>¥${formatMoney(totalAmount)}</strong></span>
+        <span>订单数：<strong>${totalOrders}</strong></span>
+        <span>平均：<strong>¥${formatMoney(avgAmount)}</strong></span>`;
+}
+
+async function loadSalesRank() {
+    try {
+        const list = await apiGet('/api/stats/sales-rank');
+        if (!list.length) {
+            $('salesRankList').innerHTML = '<div class="empty-state"><p>暂无销量排行数据</p></div>';
+            return;
+        }
+        const maxQty = Math.max(...list.map(i => Number(i.total_quantity || 0)), 1);
+        $('salesRankList').innerHTML = list.map((item, index) => `
+            <div class="rank-item">
+                <div class="rank-index">${index + 1}</div>
+                <div>
+                    <div class="rank-name" title="${item.product_name}">${item.product_name}</div>
+                    <div class="rank-meta">销售额 ¥${formatMoney(item.total_amount)}</div>
+                </div>
+                <div class="rank-value">${item.total_quantity} 件</div>
+                <div class="rank-bar"><span style="width:${Math.max(4, Number(item.total_quantity || 0) / maxQty * 100)}%;"></span></div>
+            </div>`).join('');
+    } catch(e) {
+        $('salesRankList').innerHTML = '<div class="empty-state"><p>销量排行加载失败</p></div>';
+    }
+}
+
+async function loadProfitProducts() {
+    try {
+        const list = await apiGet('/api/stats/profit-products?limit=8');
+        $('profitProducts').innerHTML = list.length === 0
+            ? '<div class="empty-state"><p>暂无商品利润数据</p></div>'
+            : `<table class="compact-table"><thead><tr><th>商品</th><th>销量</th><th>销售额</th><th>利润</th><th>毛利率</th></tr></thead><tbody>` +
+              list.map(p => `<tr>
+                <td>${p.product_name}</td>
+                <td>${p.total_quantity}</td>
+                <td>¥${formatMoney(p.sales_amount)}</td>
+                <td class="${metricClass(p.profit_amount)}">¥${formatMoney(p.profit_amount)}</td>
+                <td>${formatMoney(p.profit_rate)}%</td>
+              </tr>`).join('') + '</tbody></table>';
+    } catch(e) {
+        $('profitProducts').innerHTML = '<div class="empty-state"><p>商品利润加载失败</p></div>';
+    }
+}
+
+async function loadProfitOrders() {
+    try {
+        const list = await apiGet('/api/stats/profit-orders?limit=8');
+        $('profitOrders').innerHTML = list.length === 0
+            ? '<div class="empty-state"><p>暂无订单利润数据</p></div>'
+            : `<table class="compact-table"><thead><tr><th>订单</th><th>客户</th><th>销售额</th><th>利润</th><th>状态</th></tr></thead><tbody>` +
+              list.map(o => `<tr>
+                <td>${o.order_no}</td>
+                <td>${o.customer_name}</td>
+                <td>¥${formatMoney(o.sales_amount)}</td>
+                <td class="${metricClass(o.profit_amount)}">¥${formatMoney(o.profit_amount)}</td>
+                <td>${statusBadge(o.status)}</td>
+              </tr>`).join('') + '</tbody></table>';
+    } catch(e) {
+        $('profitOrders').innerHTML = '<div class="empty-state"><p>订单利润加载失败</p></div>';
+    }
+}
+
+async function loadCustomerRecon() {
+    try {
+        const list = await apiGet('/api/reconciliation/customers?limit=8');
+        $('customerRecon').innerHTML = list.length === 0
+            ? '<div class="empty-state"><p>暂无客户对账数据</p></div>'
+            : `<table class="compact-table"><thead><tr><th>客户</th><th>累计消费</th><th>已收款</th><th>欠款</th></tr></thead><tbody>` +
+              list.map(c => `<tr>
+                <td>${c.customer_name}</td>
+                <td>¥${formatMoney(c.total_consumption)}</td>
+                <td>¥${formatMoney(c.collected_amount)}</td>
+                <td class="${metricClass(-c.receivable_amount)}">¥${formatMoney(c.receivable_amount)}</td>
+              </tr>`).join('') + '</tbody></table>';
+    } catch(e) {
+        $('customerRecon').innerHTML = '<div class="empty-state"><p>客户对账加载失败</p></div>';
+    }
+}
+
+async function loadSupplierRecon() {
+    try {
+        const list = await apiGet('/api/reconciliation/suppliers?limit=8');
+        $('supplierRecon').innerHTML = list.length === 0
+            ? '<div class="empty-state"><p>暂无供应商对账数据</p></div>'
+            : `<table class="compact-table"><thead><tr><th>供应商</th><th>累计采购</th><th>已付款</th><th>待付款</th></tr></thead><tbody>` +
+              list.map(s => `<tr>
+                <td>${s.supplier_name}</td>
+                <td>¥${formatMoney(s.total_purchase)}</td>
+                <td>¥${formatMoney(s.paid_amount)}</td>
+                <td class="${metricClass(-s.payable_amount)}">¥${formatMoney(s.payable_amount)}</td>
+              </tr>`).join('') + '</tbody></table>';
+    } catch(e) {
+        $('supplierRecon').innerHTML = '<div class="empty-state"><p>供应商对账加载失败</p></div>';
+    }
 }
 
 // ============================================================
@@ -1398,7 +1661,7 @@ function showAdjustModal(pid, pname, currentStock) {
 async function showProductModal(pid) {
     // 加载供应商列表填充下拉框
     try {
-        const suppliers = await apiGet('/api/suppliers');
+        const suppliers = await apiList('/api/suppliers');
         const options = suppliers.map(s => `<option value="${s.name}">${s.name}</option>`);
         
         if (pid) {
@@ -1447,7 +1710,7 @@ function closeProductModal() { $('productModal').classList.remove('show'); }
 // 从库存中选择商品
 async function showProductSelector() {
     try {
-        const products = await apiGet('/api/products');
+        const products = await apiList('/api/products');
         productsCache = products;
         $('selectorTableBody').innerHTML = products.length === 0
             ? '<tr><td colspan="6" style="text-align:center;color:var(--text-muted);padding:30px;">暂无商品，请先添加商品</td></tr>'
@@ -2048,7 +2311,8 @@ async function handleFileImport() {
 // ============================================================
 function showSupplierModal(sid) {
     if (sid) {
-        fetch(API + '/api/suppliers').then(r => r.json()).then(sups => {
+        fetch(API + '/api/suppliers').then(r => r.json()).then(result => {
+            const sups = listData(result);
             const s = sups.find(x => x.id === sid);
             if (!s) return;
             $('sup-id').value = s.id;
@@ -2142,7 +2406,8 @@ async function loadSuppliers(page = 1) {
 // ============================================================
 function showCustomerModal(cid) {
     if (cid) {
-        fetch(API + '/api/customers').then(r => r.json()).then(custs => {
+        fetch(API + '/api/customers').then(r => r.json()).then(result => {
+            const custs = listData(result);
             const c = custs.find(x => x.id === cid);
             if (!c) return;
             $('cust-id').value = c.id;
@@ -2267,8 +2532,8 @@ async function loadPurchaseOrders(page = 1) {
 
 async function showPurchaseModal() {
     try {
-        const suppliers = await apiGet('/api/suppliers');
-        const products = await apiGet('/api/products');
+        const suppliers = await apiList('/api/suppliers');
+        const products = await apiList('/api/products');
         $('po-supplier').innerHTML = suppliers.map(s => `<option value="${s.id}">${s.name}</option>`).join('');
 
         const productOptions = products.map(p => `<option value="${p.id}" data-price="${p.purchase_price}">${p.name} (¥${formatMoney(p.purchase_price)})</option>`).join('');
@@ -2407,7 +2672,7 @@ async function quickAddProductInPo() {
 // 刷新采购弹窗中的所有商品下拉框
 async function refreshPoProducts(selectId = null) {
     try {
-        const products = await apiGet('/api/products');
+        const products = await apiList('/api/products');
         const productOptions = products.map(p =>
             `<option value="${p.id}" data-price="${p.purchase_price}">${p.name} (¥${formatMoney(p.purchase_price)})</option>`
         ).join('');
@@ -2508,8 +2773,8 @@ async function loadSalesOrders(page = 1) {
 
 async function showSalesModal() {
     try {
-        const customers = await apiGet('/api/customers');
-        const products = await apiGet('/api/products');
+        const customers = await apiList('/api/customers');
+        const products = await apiList('/api/products');
         $('so-customer').innerHTML = customers.map(c => `<option value="${c.id}">${c.name} (${c.region||''})</option>`).join('');
 
         // 清空已选商品行
@@ -2535,7 +2800,7 @@ async function toggleSoMultiImport() {
         panel.style.display = 'block';
         if (soMiProducts.length === 0) {
             try {
-                soMiProducts = await apiGet('/api/products');
+                soMiProducts = await apiList('/api/products');
             } catch(e) {
                 toast('加载商品失败: ' + e.message, 'error');
                 soMiProducts = [];
@@ -2841,8 +3106,8 @@ function crActionButtons(o) {
 
 async function showCRCreateModal() {
     try {
-        const customers = await apiGet('/api/customers');
-        const products = await apiGet('/api/products');
+        const customers = await apiList('/api/customers');
+        const products = await apiList('/api/products');
         crProductsCache = products;
 
         $('cr-customer').innerHTML = '<option value="">-- 选择客户 --</option>' + customers.map(c => `<option value="${c.id}">${c.name} (${c.region||''})</option>`).join('');
@@ -3126,7 +3391,7 @@ function damageActionButtons(r) {
 
 async function showDamageModal() {
     try {
-        const products = await apiGet('/api/products');
+        const products = await apiList('/api/products');
         damageProductsCache = products;
         $('damage-product').innerHTML = '<option value="">-- 选择商品 --</option>' + products.map(p => `<option value="${p.id}" data-stock="${p.current_stock}" data-price="${p.purchase_price}">${p.code} - ${p.name} (库存:${p.current_stock})</option>`).join('');
         $('damage-qty').value = 1;
@@ -3258,7 +3523,7 @@ function overflowActionButtons(r) {
 
 async function showOverflowModal() {
     try {
-        const products = await apiGet('/api/products');
+        const products = await apiList('/api/products');
         overflowProductsCache = products;
         $('overflow-product').innerHTML = '<option value="">-- 选择商品 --</option>' + products.map(p => `<option value="${p.id}" data-stock="${p.current_stock}" data-price="${p.purchase_price}">${p.code} - ${p.name} (库存:${p.current_stock})</option>`).join('');
         $('overflow-qty').value = 1;

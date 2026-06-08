@@ -1464,6 +1464,246 @@ def sales_rank():
     } for name, qty, amount in results])
 
 
+def _parse_date_arg(name):
+    """解析 YYYY-MM-DD 日期参数，解析失败时返回 None。"""
+    value = request.args.get(name, '').strip()
+    if not value:
+        return None
+    try:
+        return datetime.strptime(value, '%Y-%m-%d')
+    except ValueError:
+        return None
+
+
+def _date_range(default_days=30):
+    """获取统计日期范围，结束日期按自然日闭区间处理。"""
+    end_date = _parse_date_arg('end_date') or datetime.now()
+    start_date = _parse_date_arg('start_date') or (end_date - timedelta(days=default_days - 1))
+    start_date = start_date.replace(hour=0, minute=0, second=0, microsecond=0)
+    end_date = end_date.replace(hour=0, minute=0, second=0, microsecond=0) + timedelta(days=1)
+    return start_date, end_date
+
+
+def _add_months(dt, months):
+    """按月偏移日期，只用于统计默认范围和补零。"""
+    year = dt.year + (dt.month - 1 + months) // 12
+    month = (dt.month - 1 + months) % 12 + 1
+    return dt.replace(year=year, month=month, day=1)
+
+
+def _profit_rate(profit, amount):
+    """计算毛利率，销售额为 0 时返回 0。"""
+    amount = amount or 0
+    if amount == 0:
+        return 0
+    return round((profit or 0) / amount * 100, 2)
+
+
+@app.route('/api/stats/sales-trend', methods=['GET'])
+def sales_trend():
+    """按日/月统计销售额折线图数据"""
+    period = request.args.get('period', 'day')
+    if period not in ('day', 'month'):
+        period = 'day'
+
+    if period == 'month':
+        end_base = _parse_date_arg('end_date') or datetime.now()
+        end_month = end_base.replace(day=1, hour=0, minute=0, second=0, microsecond=0)
+        start_month = (_parse_date_arg('start_date') or _add_months(end_month, -11)).replace(
+            day=1, hour=0, minute=0, second=0, microsecond=0
+        )
+        end_limit = _add_months(end_month, 1)
+        bucket_expr = func.strftime('%Y-%m', SalesOrder.updated_at)
+        current = start_month
+        labels = []
+        while current < end_limit:
+            labels.append(current.strftime('%Y-%m'))
+            current = _add_months(current, 1)
+        start_date, end_date = start_month, end_limit
+    else:
+        start_date, end_date = _date_range(default_days=30)
+        bucket_expr = func.strftime('%Y-%m-%d', SalesOrder.updated_at)
+        labels = []
+        current = start_date
+        while current < end_date:
+            labels.append(current.strftime('%Y-%m-%d'))
+            current += timedelta(days=1)
+
+    rows = db.session.query(
+        bucket_expr.label('bucket'),
+        func.coalesce(func.sum(SalesOrder.total_amount), 0).label('sales_amount'),
+        func.count(SalesOrder.id).label('order_count')
+    ).filter(
+        SalesOrder.status.in_(['shipped', 'completed']),
+        SalesOrder.updated_at >= start_date,
+        SalesOrder.updated_at < end_date
+    ).group_by('bucket').order_by('bucket').all()
+
+    row_map = {bucket: {'sales_amount': float(amount or 0), 'order_count': int(count or 0)}
+               for bucket, amount, count in rows}
+    data = [{
+        'label': label,
+        'sales_amount': round(row_map.get(label, {}).get('sales_amount', 0), 2),
+        'order_count': row_map.get(label, {}).get('order_count', 0)
+    } for label in labels]
+
+    return jsonify({
+        'period': period,
+        'start_date': labels[0] if labels else '',
+        'end_date': labels[-1] if labels else '',
+        'data': data
+    })
+
+
+@app.route('/api/stats/profit-products', methods=['GET'])
+def profit_products():
+    """按商品统计销售利润"""
+    limit = request.args.get('limit', 10, type=int)
+    limit = max(1, min(limit, 50))
+    start_date, end_date = _date_range(default_days=90)
+
+    sales_amount_expr = func.coalesce(func.sum(SalesOrderItem.quantity * SalesOrderItem.unit_price), 0)
+    cost_amount_expr = func.coalesce(func.sum(SalesOrderItem.quantity * Product.purchase_price), 0)
+    qty_expr = func.coalesce(func.sum(SalesOrderItem.quantity), 0)
+
+    rows = db.session.query(
+        Product.id,
+        Product.name,
+        qty_expr.label('total_quantity'),
+        sales_amount_expr.label('sales_amount'),
+        cost_amount_expr.label('cost_amount'),
+        (sales_amount_expr - cost_amount_expr).label('profit_amount')
+    ).join(SalesOrderItem, Product.id == SalesOrderItem.product_id
+    ).join(SalesOrder, SalesOrderItem.order_id == SalesOrder.id
+    ).filter(
+        SalesOrder.status.in_(['shipped', 'completed']),
+        SalesOrder.updated_at >= start_date,
+        SalesOrder.updated_at < end_date
+    ).group_by(Product.id).order_by(text('profit_amount DESC')).limit(limit).all()
+
+    return jsonify([{
+        'product_id': product_id,
+        'product_name': name,
+        'total_quantity': int(total_quantity or 0),
+        'sales_amount': round(sales_amount or 0, 2),
+        'cost_amount': round(cost_amount or 0, 2),
+        'profit_amount': round(profit_amount or 0, 2),
+        'profit_rate': _profit_rate(profit_amount, sales_amount)
+    } for product_id, name, total_quantity, sales_amount, cost_amount, profit_amount in rows])
+
+
+@app.route('/api/stats/profit-orders', methods=['GET'])
+def profit_orders():
+    """按销售订单统计利润"""
+    limit = request.args.get('limit', 10, type=int)
+    limit = max(1, min(limit, 50))
+    start_date, end_date = _date_range(default_days=90)
+
+    sales_amount_expr = func.coalesce(func.sum(SalesOrderItem.quantity * SalesOrderItem.unit_price), 0)
+    cost_amount_expr = func.coalesce(func.sum(SalesOrderItem.quantity * Product.purchase_price), 0)
+
+    rows = db.session.query(
+        SalesOrder.id,
+        SalesOrder.order_no,
+        Customer.name,
+        SalesOrder.status,
+        SalesOrder.updated_at,
+        sales_amount_expr.label('sales_amount'),
+        cost_amount_expr.label('cost_amount'),
+        (sales_amount_expr - cost_amount_expr).label('profit_amount')
+    ).join(Customer, SalesOrder.customer_id == Customer.id
+    ).join(SalesOrderItem, SalesOrderItem.order_id == SalesOrder.id
+    ).join(Product, Product.id == SalesOrderItem.product_id
+    ).filter(
+        SalesOrder.status.in_(['shipped', 'completed']),
+        SalesOrder.updated_at >= start_date,
+        SalesOrder.updated_at < end_date
+    ).group_by(SalesOrder.id).order_by(SalesOrder.updated_at.desc()).limit(limit).all()
+
+    return jsonify([{
+        'order_id': order_id,
+        'order_no': order_no,
+        'customer_name': customer_name,
+        'status': status,
+        'sales_amount': round(sales_amount or 0, 2),
+        'cost_amount': round(cost_amount or 0, 2),
+        'profit_amount': round(profit_amount or 0, 2),
+        'profit_rate': _profit_rate(profit_amount, sales_amount),
+        'updated_at': updated_at.strftime('%Y-%m-%d %H:%M') if updated_at else ''
+    } for order_id, order_no, customer_name, status, updated_at,
+         sales_amount, cost_amount, profit_amount in rows])
+
+
+@app.route('/api/reconciliation/customers', methods=['GET'])
+def customer_reconciliation():
+    """客户对账汇总：累计消费、已收款、欠款"""
+    limit = request.args.get('limit', 10, type=int)
+    limit = max(1, min(limit, 100))
+
+    rows = db.session.query(
+        Customer.id,
+        Customer.name,
+        func.coalesce(func.sum(case(
+            (SalesOrder.status.in_(['shipped', 'completed']), SalesOrder.total_amount),
+            else_=0
+        )), 0).label('total_consumption'),
+        func.coalesce(func.sum(case(
+            (SalesOrder.status.in_(['collected', 'shipped', 'completed']), SalesOrder.total_amount),
+            else_=0
+        )), 0).label('collected_amount'),
+        func.coalesce(func.sum(case(
+            (SalesOrder.status == 'confirmed', SalesOrder.total_amount),
+            else_=0
+        )), 0).label('receivable_amount'),
+        func.count(SalesOrder.id).label('order_count')
+    ).outerjoin(SalesOrder, Customer.id == SalesOrder.customer_id
+    ).group_by(Customer.id).order_by(text('total_consumption DESC')).limit(limit).all()
+
+    return jsonify([{
+        'customer_id': customer_id,
+        'customer_name': name,
+        'total_consumption': round(total_consumption or 0, 2),
+        'collected_amount': round(collected_amount or 0, 2),
+        'receivable_amount': round(receivable_amount or 0, 2),
+        'order_count': int(order_count or 0)
+    } for customer_id, name, total_consumption, collected_amount, receivable_amount, order_count in rows])
+
+
+@app.route('/api/reconciliation/suppliers', methods=['GET'])
+def supplier_reconciliation():
+    """供应商对账汇总：累计采购额、已付款、待付款"""
+    limit = request.args.get('limit', 10, type=int)
+    limit = max(1, min(limit, 100))
+
+    rows = db.session.query(
+        Supplier.id,
+        Supplier.name,
+        func.coalesce(func.sum(case(
+            (PurchaseOrder.status == 'received', PurchaseOrder.total_amount),
+            else_=0
+        )), 0).label('total_purchase'),
+        func.coalesce(func.sum(case(
+            (PurchaseOrder.status.in_(['paid', 'received']), PurchaseOrder.total_amount),
+            else_=0
+        )), 0).label('paid_amount'),
+        func.coalesce(func.sum(case(
+            (PurchaseOrder.status == 'approved', PurchaseOrder.total_amount),
+            else_=0
+        )), 0).label('payable_amount'),
+        func.count(PurchaseOrder.id).label('order_count')
+    ).outerjoin(PurchaseOrder, Supplier.id == PurchaseOrder.supplier_id
+    ).group_by(Supplier.id).order_by(text('total_purchase DESC')).limit(limit).all()
+
+    return jsonify([{
+        'supplier_id': supplier_id,
+        'supplier_name': name,
+        'total_purchase': round(total_purchase or 0, 2),
+        'paid_amount': round(paid_amount or 0, 2),
+        'payable_amount': round(payable_amount or 0, 2),
+        'order_count': int(order_count or 0)
+    } for supplier_id, name, total_purchase, paid_amount, payable_amount, order_count in rows])
+
+
 # ============================================================
 # 启动入口
 # ============================================================
